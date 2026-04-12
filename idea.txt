@@ -1,0 +1,32 @@
+
+从已有文本生成带插图的文章
+1. 根据data-input文件夹里面新的文件例如a-0001.txt，调用claude cli，生成文章需要的图片的提示词和音频情绪指导。 
+  a. 先分解文章为5-10个部分，每个部分用一句话总结内容，每个部分一个情绪，每部分一张图片。
+  b. 图片要紧扣当前段落意思，尽量以图片展现，可以少量关键字。
+  c. 图片尺寸为16:9 
+  d. 提示词针对gemini-3.1-flash-image-preview优化
+2. 根据签名生成的单图提示词，调用gemini cli，生成需要的图片，放在data-output/a0001/a0001-1.png, a0001-2.png, a0001-3.png, a0001-4.png, a0001-5.png 等等
+3. 用Fun-CosyVoice3-0.5B-2512 播报文稿， 可选男声音色，根据文章内容适当添加情绪提示词，保存带情绪提示词到文件data-output/a0001/a0001-voice.txt。 
+4. 用简图，音频文件生成mp4文件。 
+
+项目管理
+1. 用yaml文件管理配置，包括单图的提示词，生成图片个数，图片尺寸，声音音色，口播速度，中间文件文件命名规则和脚本命名规则和运行规则。
+2. 使用python的话用venv配置依赖。
+3. yaml文件命名为config.yaml，放在config文件夹下面。
+4. 中间文件文件命名规则: 
+  a. 初始文章data-input/a0001.txt 
+  b. 对应的图片提示词data-output/a0001/a0001-prompts.json 内含划分好的多个部分的提示词，每个部分对应一个图片提示词，一个情绪提示词。
+  c. 图片data-output/a0001/a0001-1.png, a0001-2.png, a0001-3.png, a0001-4.png, a0001-5.png 等等 
+  d. 音频data-output/a0001/a0001-voice.txt 
+  e. 视频data-output/a0001/a0001.mp4
+5. 脚本命名规则: 
+  a. scripts/s1-generate-prompts.py 
+  b. scripts/s2-generate-image.py 
+  c. scripts/s3-generate-voice.py 
+  d. scripts/s4-generate-video.py 
+6. 脚本运行规则: 
+  a. 每一步脚本有同名log文件，例如scripts/s1-generate-prompt.py 有同名log文件data-output/a0001/s1-generate-prompt.log 
+  b. log文件记录脚本运行时间，输入参数，输出结果，错误信息等
+  c. 总的运行脚本命名为scripts/run.py
+  d. 总的运行脚本要逐步执行，每一步执行完后，都要检查log文件，确保没有错误，然后才能执行下一步
+  e. 总的运行脚本要能接受参数，包括文章路径，总体情绪,默认情绪从文章提示词文件data-output/a0001/a0001-prompts.json中提取，例如python scripts/run.py data-input/a0001.txt  会从data-output/a0001/a0001-prompts.json中提取情绪，然后调用s1-generate-prompt.py生成图片提示词，然后调用s2-generate-image.py生成图片，然后调用s3-generate-voice.py生成音频，然后调用s4-generate-video.py生成视频。

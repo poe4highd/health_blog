@@ -1,0 +1,6 @@
+google-genai
+Pillow
+PyYAML
+python-dotenv
+grpcio
+protobuf

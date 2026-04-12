@@ -1,0 +1,12 @@
+venv/
+__pycache__/
+*.wav
+*.mp3
+*.log
+.DS_Store
+data-output/
+config/*.json
+_archive/config/
+.env
+!data-output/male_ref.wav
+!data-output/locked_male_voice.wav

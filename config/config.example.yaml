@@ -1,0 +1,46 @@
+# ─── 文章插图视频生成器配置（模板） ─────────────────────
+
+# 路径配置
+paths:
+  input_dir: "data-input"
+  output_dir: "data-output"
+
+# 步骤 1：文章分段 + 提示词（Claude CLI）
+segmentation:
+  min_segments: 5
+  max_segments: 10
+  claude_timeout: 300       # Claude CLI 超时（秒）
+
+# 步骤 2：图片生成（Gemini API）
+image:
+  model: "gemini-3.1-flash-image-preview"
+  aspect_ratio: "16:9"
+  style_prompt: |
+    风格：高质量插画，清晰表达主题，色彩鲜明。
+    可以包含少量关键词文字辅助表达，但尽量以图片展现主题。
+
+# 步骤 3：语音播报（CosyVoice gRPC 本地服务）
+tts:
+  engine: "cosyvoice-grpc"
+  grpc_host: "localhost"
+  grpc_port: 50000
+  model: "Fun-CosyVoice3-0.5B-2512"
+  voice: "male"             # male / female
+  speed: 1.0
+  sample_rate: 22050
+
+# 步骤 4：视频合成（ffmpeg）
+video:
+  width: 1920
+  height: 1080
+  fps: 30
+  audio_bitrate: "192k"
+  transition: "fade"
+  transition_duration: 0.5  # 转场时长（秒）
+
+# CosyVoice 服务部署参考
+cosyvoice_server:
+  install_dir: "/opt/CosyVoice"
+  model_symlink: "./models"           # ln -s /opt/CosyVoice/pretrained_models ./models
+  conda_env: "cosyvoice"
+  grpc_port: 50000
