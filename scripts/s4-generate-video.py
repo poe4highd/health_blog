@@ -14,7 +14,6 @@ import os
 import subprocess
 import sys
 import logging
-import wave
 from pathlib import Path
 
 import yaml
@@ -76,6 +75,33 @@ def get_audio_duration(audio_path: Path) -> float:
         return 0.0
 
 
+def write_concat_list(files: list[Path], list_path: Path):
+    """写入 ffmpeg concat demuxer 所需的文件列表"""
+    with open(list_path, "w", encoding="utf-8") as f:
+        for file_path in files:
+            escaped = str(file_path).replace("\\", "\\\\").replace("'", "'\\''")
+            f.write(f"file '{escaped}'\n")
+
+
+def create_silence_audio(output_path: Path, duration: float, logger: logging.Logger,
+                         sample_rate: int = 24000) -> bool:
+    """生成指定时长的静音 WAV，用于补齐缺失段落的音频"""
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "lavfi",
+        "-i", f"anullsrc=r={sample_rate}:cl=mono",
+        "-t", f"{duration:.2f}",
+        "-c:a", "pcm_s16le",
+        str(output_path),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    if result.returncode == 0:
+        return True
+
+    logger.error(f"  ❌ 静音片段生成失败: {result.stderr[:200]}")
+    return False
+
+
 def build_slideshow_video(images_with_duration: list, output_path: Path,
                           cfg: dict, logger: logging.Logger) -> Path:
     """使用 ffmpeg 将图片序列合成为无声视频（按各图时长展示）"""
@@ -119,9 +145,7 @@ def build_slideshow_video(images_with_duration: list, output_path: Path,
 
     # 用 concat demuxer 拼接所有片段
     concat_list = tmp_dir / "concat.txt"
-    with open(concat_list, "w") as f:
-        for seg in segment_files:
-            f.write(f"file '{seg}'\n")
+    write_concat_list(segment_files, concat_list)
 
     silent_video = tmp_dir / "silent.mp4"
     cmd = [
@@ -136,6 +160,50 @@ def build_slideshow_video(images_with_duration: list, output_path: Path,
         logger.error(f"  ❌ 视频拼接失败: {result.stderr[:200]}")
 
     return silent_video
+
+
+def build_segment_audio(audio_segments: list, output_dir: Path,
+                        logger: logging.Logger) -> Path | None:
+    """按段落顺序拼接分段音频；缺失段落补静音，避免画音错位"""
+    if not audio_segments:
+        return None
+
+    tmp_dir = output_dir / "_tmp_video"
+    tmp_dir.mkdir(exist_ok=True)
+
+    concat_inputs = []
+    real_audio_count = 0
+
+    for seg_id, audio_path, duration in audio_segments:
+        if audio_path is not None:
+            concat_inputs.append(audio_path)
+            real_audio_count += 1
+            continue
+
+        silence_path = tmp_dir / f"silence_{seg_id:03d}.wav"
+        if not create_silence_audio(silence_path, duration, logger):
+            return None
+        logger.warning(f"  [{seg_id}] 缺少分段音频，已补 {duration:.1f}s 静音")
+        concat_inputs.append(silence_path)
+
+    if real_audio_count == 0:
+        return None
+
+    merged_audio = tmp_dir / "narration.wav"
+    concat_list = tmp_dir / "audio_concat.txt"
+    write_concat_list(concat_inputs, concat_list)
+
+    result = subprocess.run(
+        ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
+         "-i", str(concat_list), "-c", "copy", str(merged_audio)],
+        capture_output=True, text=True, timeout=120,
+    )
+    if result.returncode == 0:
+        logger.info(f"已按段落顺序拼接 {len(concat_inputs)} 段音频")
+        return merged_audio
+
+    logger.error(f"  ❌ 分段音频拼接失败: {result.stderr[:200]}")
+    return None
 
 
 def merge_audio_video(video_path: Path, audio_path: Path,
@@ -185,6 +253,14 @@ def main():
     article_path = Path(args.article_path)
     if not article_path.is_absolute():
         article_path = PROJECT_ROOT / article_path
+    article_path = article_path.resolve()
+
+    try:
+        article_path.relative_to(PROJECT_ROOT)
+    except ValueError:
+        print(f"❌ 路径必须在项目目录内: {article_path}")
+        sys.exit(1)
+
     article_id = article_path.stem
 
     output_dir = PROJECT_ROOT / cfg.get("paths", {}).get("output_dir", "data-output") / article_id
@@ -207,8 +283,9 @@ def main():
     data = json.loads(prompts_path.read_text(encoding="utf-8"))
     segments = data.get("segments", [])
 
-    # 收集图片和对应音频时长
+    # 收集图片和对应分段音频
     images_with_duration = []
+    audio_segments = []
     total_duration = 0
 
     for seg in segments:
@@ -223,11 +300,18 @@ def main():
         # 获取对应音频时长
         if audio_path.exists():
             duration = get_audio_duration(audio_path)
-            logger.info(f"  [{seg_id}] {img_path.name} → {duration:.1f}s")
+            if duration > 0:
+                logger.info(f"  [{seg_id}] {img_path.name} → {duration:.1f}s")
+                audio_segments.append((seg_id, audio_path, duration))
+            else:
+                duration = 5.0
+                logger.warning(f"  [{seg_id}] {audio_path.name} 时长探测失败，改用 {duration:.1f}s 静音补齐")
+                audio_segments.append((seg_id, None, duration))
         else:
             # 无音频时使用默认时长
             duration = 5.0
             logger.warning(f"  [{seg_id}] {img_path.name} → {duration:.1f}s（无音频，使用默认）")
+            audio_segments.append((seg_id, None, duration))
 
         images_with_duration.append((img_path, duration))
         total_duration += duration
@@ -243,10 +327,10 @@ def main():
     silent_video = build_slideshow_video(images_with_duration, output_dir, cfg, logger)
 
     # 合并音频
-    merged_audio = output_dir / f"{article_id}-voice.wav"
     final_output = output_dir / f"{article_id}.mp4"
+    merged_audio = build_segment_audio(audio_segments, output_dir, logger)
 
-    if merged_audio.exists():
+    if merged_audio is not None and merged_audio.exists():
         logger.info("合并音频和视频...")
         success = merge_audio_video(silent_video, merged_audio, final_output, cfg, logger)
     else:

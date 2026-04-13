@@ -5,6 +5,7 @@ s2-generate-image.py — 步骤2：根据提示词生成配图
 读取 a0001-prompts.json 中的 image_prompt，调用 Gemini API 生成图片。
 
 用法: python scripts/s2-generate-image.py data-input/a0001.txt
+      python scripts/s2-generate-image.py data-input/a0001.txt -s 3
 """
 
 import argparse
@@ -134,6 +135,7 @@ def main():
         description="步骤2：根据提示词生成配图"
     )
     parser.add_argument("article_path", help="文章文件路径，如 data-input/a0001.txt")
+    parser.add_argument("-s", "--segment", type=int, help="只生成指定段落 ID 的图片")
     args = parser.parse_args()
 
     load_dotenv()
@@ -143,6 +145,14 @@ def main():
     article_path = Path(args.article_path)
     if not article_path.is_absolute():
         article_path = PROJECT_ROOT / article_path
+    article_path = article_path.resolve()
+
+    try:
+        article_path.relative_to(PROJECT_ROOT)
+    except ValueError:
+        print(f"❌ 路径必须在项目目录内: {article_path}")
+        sys.exit(1)
+
     article_id = article_path.stem
 
     output_dir = PROJECT_ROOT / cfg.get("paths", {}).get("output_dir", "data-output") / article_id
@@ -166,6 +176,13 @@ def main():
     # 读取提示词
     data = json.loads(prompts_path.read_text(encoding="utf-8"))
     segments = data.get("segments", [])
+
+    if args.segment is not None:
+        segments = [seg for seg in segments if seg["id"] == args.segment]
+        if not segments:
+            logger.error(f"❌ 未找到段落 ID: {args.segment}")
+            sys.exit(1)
+
     logger.info(f"共 {len(segments)} 个段落需要生成图片")
 
     # 逐段生成

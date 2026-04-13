@@ -85,11 +85,10 @@ def generate_voice_local(text: str, output_path: Path, cfg: dict,
         instruct_text = f"用流利的中文播报以下文本，语气专业，{{style_suffix}}"
 
     # 构造推理脚本
-    dummy_wav_path = output_path.parent / "dummy.wav"
-    
     inference_script = f"""
 import sys
 import os
+import json
 import torchaudio
 import torch
 import wave
@@ -106,7 +105,7 @@ def mock_torchaudio_load(filepath, backend=None, **kwargs):
             dtype = np.int32
         else:
             raise ValueError(f"Unsupported sample width: {{params.sampwidth}}")
-        
+
         data = np.frombuffer(frames, dtype=dtype)
         # 归一化
         data = data.astype(np.float32) / (2**(8 * params.sampwidth - 1))
@@ -121,15 +120,15 @@ def mock_torchaudio_save(filepath, tensor, sample_rate, **kwargs):
     data = tensor.detach().cpu().numpy()
     if data.ndim == 1:
         data = data.reshape(1, -1)
-    
+
     # 自动增益归一化：将响度显著提升（Peak 1.5 + Clip 处理以达到感官加倍）
     max_val = np.abs(data).max()
     if max_val > 1e-6:
         data = data / max_val * 1.5
-    
+
     # 转为 int16 并执行安全截断
     data = (data * 32767).clip(-32768, 32767).astype(np.int16)
-    
+
     with wave.open(str(filepath), 'wb') as wf:
         wf.setnchannels(data.shape[0])
         wf.setsampwidth(2)
@@ -142,39 +141,6 @@ torchaudio.save = mock_torchaudio_save
 
 
 sys.path.insert(0, '{install_dir}')
-
-# ─── Monkey Patch 3 & 4: 解决 CosyVoice3 协议兼容与幻觉复读问题 ──────
-from cosyvoice.cli.frontend import CosyVoiceFrontEnd
-original_frontend_zero_shot = CosyVoiceFrontEnd.frontend_zero_shot
-
-def patched_frontend_zero_shot(self, tts_text, prompt_text, *args, **kwargs):
-    model_input = original_frontend_zero_shot(self, tts_text, prompt_text, *args, **kwargs)
-    # CosyVoice3 (Qwen) 协议要求：
-    # 1. prompt_text 结尾必须有 151646 分隔符
-    # 2. text 头部必须有 151646 分隔符
-    
-    # 修改 prompt_text (指令部分)
-    if 'prompt_text' in model_input:
-        prompt_list = model_input['prompt_text'].tolist()[0]
-        if 151646 not in prompt_list:
-            sep = torch.tensor([[151646]], dtype=model_input['prompt_text'].dtype).to(model_input['prompt_text'].device)
-            model_input['prompt_text'] = torch.cat([model_input['prompt_text'], sep], dim=1)
-            model_input['prompt_text_len'] = model_input['prompt_text_len'] + 1
-        
-    # 修改 text (正文部分)
-    if 'text' in model_input:
-        text_list = model_input['text'].tolist()[0]
-        if 151646 not in text_list:
-            sep = torch.tensor([[151646]], dtype=model_input['text'].dtype).to(model_input['text'].device)
-            model_input['text'] = torch.cat([sep, model_input['text']], dim=1)
-            model_input['text_len'] = model_input['text_len'] + 1
-    
-    return model_input
-
-CosyVoiceFrontEnd.frontend_zero_shot = patched_frontend_zero_shot
-# ─────────────────────────────────────────────────────────
-
-# ─────────────────────────────────────────────────────────
 
 if 'CosyVoice3' in '{model_name}':
     from cosyvoice.cli.cosyvoice import CosyVoice3 as ModelClass
@@ -189,21 +155,20 @@ if 'CosyVoice3' not in '{model_name}':
 
 model = ModelClass('{install_dir}/pretrained_models/{model_name}', **kwargs)
 
-text = '''{text.replace("'", "\\'")}'''
-instruct = '''{instruct_text.replace("'", "\\'")}'''
+text = json.loads({json.dumps(json.dumps(text))})
+instruct = json.loads({json.dumps(json.dumps(instruct_text))})
 
-# 锁定音色素材与其配套文本 (解决幻觉复读的关键)
+# 参考音频（用于音色克隆）
 project_root = '{PROJECT_ROOT}'
-official_wav = os.path.join(project_root, 'data-output/male_ref.wav')
-official_text = "And then later on, fully acquiring that company. So keeping management in line, interest in line with the asset that's coming into the family is a reason why sometimes we don't buy the whole thing."
+prompt_wav = os.path.join(project_root, 'data-output/male_ref.wav')
 
-# 构造复合 Prompt (System Prompt + style + Ref Text)
-full_prompt = f"You are a helpful assistant. {{instruct}}<|endofprompt|>{{official_text}}"
+# instruct2 格式：System Prompt + 风格指令 + <|endofprompt|>（不含参考文本）
+instruct_prompt = f"You are a helpful assistant. {{instruct}}<|endofprompt|>"
 
 output_list = []
-# 使用更稳定的 inference_zero_shot 接口实现 CosyVoice3 推理
+# 使用 inference_instruct2 接口：风格控制 + 音色克隆
 try:
-    generator = model.inference_zero_shot(text, full_prompt, official_wav, stream=False, speed={speed})
+    generator = model.inference_instruct2(text, instruct_prompt, prompt_wav, stream=False, speed={speed})
 except Exception as e:
     print(f"ERROR: Inference failed: {{e}}")
     sys.exit(1)
@@ -263,35 +228,6 @@ else:
             tmp_script.unlink()
 
 
-def concat_wav_files(wav_files: list, output_path: Path, logger: logging.Logger):
-    """使用 ffmpeg 拼接多个 wav 文件为一个"""
-    if len(wav_files) == 1:
-        # 只有一个文件，直接复制
-        import shutil
-        shutil.copy2(wav_files[0], output_path)
-        return
-
-    # 创建 ffmpeg concat 列表
-    list_path = output_path.parent / "_concat_list.txt"
-    with open(list_path, "w") as f:
-        for wav in wav_files:
-            f.write(f"file '{wav}'\n")
-
-    try:
-        result = subprocess.run(
-            ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
-             "-i", str(list_path), "-c", "copy", str(output_path)],
-            capture_output=True, text=True, timeout=60,
-        )
-        if result.returncode == 0:
-            logger.info(f"  ✅ 音频拼接完成: {output_path.name}")
-        else:
-            logger.error(f"  ❌ 拼接失败: {result.stderr[:200]}")
-    finally:
-        if list_path.exists():
-            list_path.unlink()
-
-
 def generate_voice_text(segments: list, article_text: str, output_dir: Path,
                         article_id: str, logger: logging.Logger):
     """生成带情绪标注的播报文本文件"""
@@ -328,6 +264,14 @@ def main():
     article_path = Path(args.article_path)
     if not article_path.is_absolute():
         article_path = PROJECT_ROOT / article_path
+    article_path = article_path.resolve()
+
+    try:
+        article_path.relative_to(PROJECT_ROOT)
+    except ValueError:
+        print(f"❌ 路径必须在项目目录内: {article_path}")
+        sys.exit(1)
+
     article_id = article_path.stem
 
     output_dir = PROJECT_ROOT / cfg.get("paths", {}).get("output_dir", "data-output") / article_id
@@ -364,7 +308,6 @@ def main():
     generate_voice_text(segments, article_text, output_dir, article_id, logger)
 
     # 逐段生成音频
-    wav_files = []
     success_count = 0
     fail_count = 0
 
@@ -383,23 +326,15 @@ def main():
         # 跳过已存在的音频
         if wav_path.exists() and wav_path.stat().st_size > 0:
             logger.info(f"  ⏭️ 跳过段落 {seg_id}（音频已存在）")
-            wav_files.append(wav_path)
             success_count += 1
             continue
 
         logger.info(f"  [{seg_id}/{len(segments)}] {emotion} — {text[:30]}...")
 
         if generate_voice_local(text, wav_path, cfg, emotion, logger):
-            wav_files.append(wav_path)
             success_count += 1
         else:
             fail_count += 1
-
-    # 拼接所有音频，只有当全段落跑完或者没有指定 segment 时才进行汇总拼接
-    if wav_files and args.segment is None:
-        merged_path = output_dir / f"{article_id}-voice.wav"
-        logger.info(f"拼接 {len(wav_files)} 段音频...")
-        concat_wav_files([str(f) for f in wav_files], merged_path, logger)
 
     logger.info(f"{'='*50}")
     logger.info(f"✅ 语音生成完成: 成功 {success_count}, 失败 {fail_count}")
