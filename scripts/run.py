@@ -107,6 +107,13 @@ def main():
     article_path = Path(args.article_path)
     if not article_path.is_absolute():
         article_path = PROJECT_ROOT / article_path
+    article_path = article_path.resolve()
+
+    try:
+        article_path.relative_to(PROJECT_ROOT)
+    except ValueError:
+        print(f"❌ 路径必须在项目目录内: {article_path}")
+        sys.exit(1)
 
     if not article_path.exists():
         print(f"❌ 文章文件不存在: {article_path}")
