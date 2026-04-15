@@ -73,7 +73,8 @@ def generate_voice_local(text: str, output_path: Path, cfg: dict,
     conda_env = cosyvoice_cfg.get("conda_env", "cosyvoice")
 
     model_name = tts_cfg.get("model", "Fun-CosyVoice3-0.5B")
-    speed = tts_cfg.get("speed", 1.2)
+    speed = tts_cfg.get("speed", 1.0)
+    gain = tts_cfg.get("gain", 1.5)
     style_suffix = tts_cfg.get("instruct_suffix", "展现出专业且严谨的科学素养风格。")
 
     if emotion:
@@ -112,9 +113,10 @@ def mock_torchaudio_save(filepath, tensor, sample_rate, **kwargs):
     data = tensor.detach().cpu().numpy()
     if data.ndim == 1:
         data = data.reshape(1, -1)
+    # 峰值增益归一化（gain 由 config.yaml tts.gain 控制）
     max_val = np.abs(data).max()
     if max_val > 1e-6:
-        data = data / max_val * 1.5
+        data = data / max_val * {gain}
     data = (data * 32767).clip(-32768, 32767).astype(np.int16)
     with wave.open(str(filepath), 'wb') as wf:
         wf.setnchannels(data.shape[0])

@@ -75,7 +75,8 @@ def generate_voice_local(text: str, output_path: Path, cfg: dict,
     conda_env = cosyvoice_cfg.get("conda_env", "cosyvoice")
     # 获取配置参数
     model_name = tts_cfg.get("model", "Fun-CosyVoice3-0.5B")
-    speed = tts_cfg.get("speed", 2.0)
+    speed = tts_cfg.get("speed", 1.0)
+    gain = tts_cfg.get("gain", 1.5)
     style_suffix = tts_cfg.get("instruct_suffix", "展现出专业且严谨的科学素养风格。")
 
     # 构造 instruct 提示词
@@ -121,10 +122,10 @@ def mock_torchaudio_save(filepath, tensor, sample_rate, **kwargs):
     if data.ndim == 1:
         data = data.reshape(1, -1)
 
-    # 自动增益归一化：将响度显著提升（Peak 1.5 + Clip 处理以达到感官加倍）
+    # 峰值增益归一化（gain 由 config.yaml tts.gain 控制）
     max_val = np.abs(data).max()
     if max_val > 1e-6:
-        data = data / max_val * 1.5
+        data = data / max_val * {gain}
 
     # 转为 int16 并执行安全截断
     data = (data * 32767).clip(-32768, 32767).astype(np.int16)
