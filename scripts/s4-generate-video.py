@@ -4,8 +4,11 @@ s4-generate-video.py — 步骤4：视频合成
 
 将配图 + 音频合成为 MP4 视频。
 每张图片的展示时长 = 对应段落音频时长。
+默认在视频首尾拼接片头/片尾 MP4（可用 --no-bumpers 跳过）。
 
-用法: python scripts/s4-generate-video.py data-input/a0001.txt
+用法:
+  python scripts/s4-generate-video.py data-input/a0001.txt
+  python scripts/s4-generate-video.py data-input/a0001.txt --no-bumpers
 """
 
 import argparse
@@ -240,11 +243,77 @@ def cleanup_tmp(output_dir: Path, logger: logging.Logger):
         logger.debug("临时文件已清理")
 
 
+def concat_with_bumpers(body_mp4: Path, intro_mp4: Path | None,
+                        outro_mp4: Path | None, output_path: Path,
+                        cfg: dict, logger: logging.Logger) -> bool:
+    """将片头、正文、片尾三段 MP4 拼接为最终视频（filter_complex concat）"""
+    video_cfg = cfg.get("video", {})
+    audio_bitrate = video_cfg.get("audio_bitrate", "192k")
+    width = video_cfg.get("width", 1920)
+    height = video_cfg.get("height", 1080)
+    fps = video_cfg.get("fps", 30)
+
+    inputs = []
+    segments = []  # (has_audio,)
+
+    if intro_mp4:
+        inputs += ["-i", str(intro_mp4)]
+        segments.append(True)
+
+    inputs += ["-i", str(body_mp4)]
+    segments.append(True)
+
+    if outro_mp4:
+        inputs += ["-i", str(outro_mp4)]
+        segments.append(True)
+
+    n = len(segments)
+
+    # 构造 filter_complex：统一缩放/fps/采样率/声道，然后 concat
+    # concat 输入顺序必须交错：[v0][a0][v1][a1]...
+    filter_parts = []
+    for i in range(n):
+        filter_parts.append(
+            f"[{i}:v]scale={width}:{height}:force_original_aspect_ratio=decrease,"
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,"
+            f"fps={fps},setsar=1[v{i}]"
+        )
+        filter_parts.append(
+            f"[{i}:a]aformat=sample_rates=48000:channel_layouts=stereo[a{i}]"
+        )
+
+    interleaved = "".join(f"[v{i}][a{i}]" for i in range(n))
+    filter_parts.append(f"{interleaved}concat=n={n}:v=1:a=1[vout][aout]")
+
+    filter_complex = ";".join(filter_parts)
+
+    cmd = [
+        "ffmpeg", "-y",
+        *inputs,
+        "-filter_complex", filter_complex,
+        "-map", "[vout]", "-map", "[aout]",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", audio_bitrate,
+        str(output_path),
+    ]
+
+    logger.info(f"拼接 {n} 段视频（片头+正文+片尾）...")
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    if result.returncode == 0:
+        logger.info(f"  ✅ 最终视频: {output_path.name}")
+        return True
+    else:
+        logger.error(f"  ❌ 拼接失败: {result.stderr[-400:]}")
+        return False
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="步骤4：视频合成"
     )
     parser.add_argument("article_path", help="文章文件路径")
+    parser.add_argument("--no-bumpers", action="store_true",
+                        help="跳过片头/片尾，只输出正文视频")
     args = parser.parse_args()
 
     load_dotenv()
@@ -330,15 +399,46 @@ def main():
     final_output = output_dir / f"{article_id}.mp4"
     merged_audio = build_segment_audio(audio_segments, output_dir, logger)
 
+    # 合成正文带音频的 MP4
+    tmp_dir = output_dir / "_tmp_video"
+    body_mp4 = tmp_dir / "body.mp4"
+
     if merged_audio is not None and merged_audio.exists():
         logger.info("合并音频和视频...")
-        success = merge_audio_video(silent_video, merged_audio, final_output, cfg, logger)
+        success = merge_audio_video(silent_video, merged_audio, body_mp4, cfg, logger)
     else:
-        # 无音频，直接使用静音视频
         logger.warning("未找到合并音频，生成静音视频")
         import shutil
-        shutil.copy2(silent_video, final_output)
+        shutil.copy2(silent_video, body_mp4)
         success = True
+
+    # 拼接片头/片尾
+    if success and not args.no_bumpers:
+        channel_cfg = cfg.get("channel", {})
+        intro_rel = channel_cfg.get("intro_video", "")
+        outro_rel = channel_cfg.get("outro_video", "")
+        intro_mp4 = (PROJECT_ROOT / intro_rel) if intro_rel else None
+        outro_mp4 = (PROJECT_ROOT / outro_rel) if outro_rel else None
+
+        if intro_mp4 and not intro_mp4.exists():
+            logger.warning(f"  ⚠️ 片头文件不存在: {intro_mp4}，跳过片头")
+            intro_mp4 = None
+        if outro_mp4 and not outro_mp4.exists():
+            logger.warning(f"  ⚠️ 片尾文件不存在: {outro_mp4}，跳过片尾")
+            outro_mp4 = None
+
+        if intro_mp4 or outro_mp4:
+            success = concat_with_bumpers(
+                body_mp4, intro_mp4, outro_mp4, final_output, cfg, logger
+            )
+        else:
+            logger.info("未配置片头/片尾，直接输出正文视频")
+            import shutil
+            shutil.copy2(body_mp4, final_output)
+    elif success:
+        import shutil
+        shutil.copy2(body_mp4, final_output)
+        logger.info("--no-bumpers：跳过片头/片尾拼接")
 
     # 清理临时文件
     cleanup_tmp(output_dir, logger)

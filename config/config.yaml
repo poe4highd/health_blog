@@ -45,3 +45,14 @@ cosyvoice_server:
   model_symlink: "./models"           # ln -s /opt/CosyVoice/pretrained_models ./models
   conda_env: "cosyvoice"
   grpc_port: 50000
+
+# 频道片头 / 片尾问候语
+channel:
+  intro_text: "大家好，欢迎来到 健康真相实验室。这里我们用科学和理性，一起拆解健康世界里的各种迷思。"
+  outro_text: "如果喜欢这样的科学拆解，记得订阅。保持希望，同时保持怀疑。我们下期再见。"
+  intro_emotion: "热情、诚挚"
+  outro_emotion: "温暖、从容"
+  intro_output: "data-input/Channel Intro Voice.wav"
+  outro_output: "data-input/Channel Outro Voice.wav"
+  intro_video: "data-input/Health Channel Intro Music Logo Voice.mp4"
+  outro_video: "data-input/Health Channel Outro Music Logo Voice.mp4"
